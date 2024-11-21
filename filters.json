@@ -1,0 +1,14 @@
+{
+  "minDevBuy": "0.1",
+  "maxDevBuy": "2",
+  "minDevPct": "0",
+  "maxDevPct": "5",
+  "minDevBal": "0.01",
+  "maxDevBal": "5",
+  "bannedNames": [],
+  "bannedCreators": [],
+  "twt": "T",
+  "tg": "T",
+  "web": "T",
+  "age": 2
+}
