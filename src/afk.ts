@@ -7,6 +7,7 @@ import { Metaplex } from "@metaplex-foundation/js";
 import NodeCache from "node-cache";
 import chalk from "chalk";
 import { performance } from "perf_hooks";
+import { createClient } from "redis";
 import { afkBlox } from "./afkBuy";
 import loadConfig from "./loadConfig";
 import loadFilters from "./loadFilters";
@@ -70,6 +71,12 @@ async function monitorAFK(): Promise<void> {
     );
   });
 }
+
+const launcherTextTemplates = [
+  (token: string) => `Hey Blob, New token found for you! $${token}`,
+  (token: string) => `What do you think about $${token}?`,
+  (token: string) => `How about this! $${token}`,
+];
 
 async function fetchPumpAccounts(txId: string, detectionTime: number) {
   if (!connection) throw new Error("Connection not initialized");
@@ -264,6 +271,43 @@ async function getDevSOLBalance(creator: PublicKey): Promise<number> {
   return solBalance;
 }
 
+export const redis = createClient({
+  password: process.env.REDIS_PASSWORD,
+});
+
+export type Message = {
+  message: string;
+  timestamp: number;
+  onchain: boolean;
+  tweeted: boolean;
+  tweetId: string;
+  emotion: string;
+  growth: string;
+  blocknumber: number;
+  txHash: string;
+  price: string;
+  mcap: number;
+  holders: number;
+  treasury: number;
+};
+
+export async function getLastMessage() {
+  await redis.connect();
+  const lastMessage = await redis.lRange("message_history", -1, -1);
+  const lastMsg: Message = JSON.parse(lastMessage[0]);
+  await redis.disconnect();
+  return lastMsg;
+}
+
+export const EMOTION_TRUST_THRESHOLD_MAP: Record<string, number> = {
+  sad: 90,
+  tired: 90,
+  idle: 80,
+  normal: 80,
+  curious: 70,
+  happy: 70,
+};
+
 async function checkBuyConditions(
   isBondingCurveConditionMet: boolean,
   isDevConditionMet: boolean,
@@ -280,6 +324,7 @@ async function checkBuyConditions(
   detectionTime: number
 ) {
   const currentTime = Date.now();
+
   if (currentTime - detectionTime > 10000) {
     console.log(
       "More than 10 seconds has passed since detection. Skipping the buy operation."
@@ -287,64 +332,94 @@ async function checkBuyConditions(
     return;
   }
 
+  const launcherMsg = launcherTextTemplates[
+    Math.floor(Math.random() * launcherTextTemplates.length)
+  ](metadata.symbol);
+  let blobMsg = ``;
+
   // Check banned names and creators
   if (filters.bannedNames.includes(metadata.name)) {
     console.log("Banned token name: ", metadata.name);
-    return;
-  }
-
-  if (filters.bannedCreators.includes(devWallet)) {
+    blobMsg += `Sorry but I've banned that token.\n`;
+  } else if (filters.bannedCreators.includes(devWallet)) {
+    blobMsg += `Sorry but I've banned the creator of this token. \n`;
     console.log("Banned creator: ", devWallet);
-    return;
+  } else {
+    const { emotion, treasury } = await getLastMessage();
+    console.log({ emotion });
+    const trustPointEmotion = EMOTION_TRUST_THRESHOLD_MAP[emotion];
+
+    let trustPoint = 100;
+
+    // Check dev buy amount, percentage, and balance
+    if (
+      maxSolCost < filters.minDevBuy ||
+      maxSolCost > filters.maxDevBuy ||
+      devPct < filters.minDevPct ||
+      devPct > filters.maxDevPct ||
+      devSOLBalance < filters.minDevBal ||
+      devSOLBalance > filters.maxDevBal
+    ) {
+      blobMsg += `developer's activity is not looking good...\n`;
+      console.log(
+        `Invalid dev conditions: maxSolCost: ${maxSolCost}, devPct: ${devPct}%, devSOLBalance: ${devSOLBalance.toFixed(
+          4
+        )} SOL`
+      );
+      trustPoint -= 20;
+    }
+
+    // Check social requirements
+    const {
+      twitter: twitterRequired,
+      telegram: telegramRequired,
+      website: websiteRequired,
+    } = filters;
+    if (
+      (twitterRequired === "T" && !metadata.twitter) ||
+      (websiteRequired === "T" && !metadata.website) ||
+      (telegramRequired === "T" && !metadata.telegram)
+    ) {
+      blobMsg += `missing required social link(s).\n`;
+      console.log(
+        `Missing required social link(s) for token: ${metadata.name}`
+      );
+      trustPoint -= 100;
+    }
+
+    // Check bonding curve and dev conditions
+    if (!isBondingCurveConditionMet || !isDevConditionMet) {
+      blobMsg += `bonding burve's current status is not looking good.\n`;
+      console.log("Bonding Curve or Dev condition not met.");
+      trustPoint -= 20;
+    }
+
+    //Check dev wallet age
+    if (devAge && devAge < filters.age) {
+      blobMsg += `dev wallet is too young. Age: ${devAge} days\n`;
+      console.log(`Dev wallet is too young. Age: ${devAge} days`);
+      trustPoint -= 20;
+    }
+
+    console.log(`Trust point of this token is ${trustPoint}.`);
+
+    if (trustPoint < trustPointEmotion) {
+      blobMsg += `i'm not thinking this is good token with this emotion. skipping the buy operation.\n`;
+      console.log(
+        `Trust point is less than the emotion trust point. I'm not thinking this is good token with this emotion. Skipping the buy operation.`
+      );
+    } else {
+      blobMsg += `with my current emotion: ${emotion}, i feel i need to buy this token. i'm buying it.\n`;
+      // If all conditions pass, buy the pump
+      console.log("All conditions met. Buying the pump...");
+      await afkBlox(mint, bondingCurve, aBondCurve);
+    }
   }
 
-  // Check dev buy amount, percentage, and balance
-  if (
-    maxSolCost < filters.minDevBuy ||
-    maxSolCost > filters.maxDevBuy ||
-    devPct < filters.minDevPct ||
-    devPct > filters.maxDevPct ||
-    devSOLBalance < filters.minDevBal ||
-    devSOLBalance > filters.maxDevBal
-  ) {
-    console.log(
-      `Invalid dev conditions: maxSolCost: ${maxSolCost}, devPct: ${devPct}%, devSOLBalance: ${devSOLBalance.toFixed(
-        4
-      )} SOL`
-    );
-    return;
-  }
-
-  // Check social requirements
-  const {
-    twitter: twitterRequired,
-    telegram: telegramRequired,
-    website: websiteRequired,
-  } = filters;
-  if (
-    (twitterRequired === "T" && !metadata.twitter) ||
-    (websiteRequired === "T" && !metadata.website) ||
-    (telegramRequired === "T" && !metadata.telegram)
-  ) {
-    console.log(`Missing required social link(s) for token: ${metadata.name}`);
-    return;
-  }
-
-  // Check bonding curve and dev conditions
-  if (!isBondingCurveConditionMet || !isDevConditionMet) {
-    console.log("Bonding Curve or Dev condition not met.");
-    return;
-  }
-
-  //Check dev wallet age
-  if (devAge && devAge < filters.age) {
-    console.log(`Dev wallet is too young. Age: ${devAge} days`);
-    return;
-  }
-
-  // If all conditions pass, buy the pump
-  console.log("All conditions met. Buying the pump...");
-  await afkBlox(mint, bondingCurve, aBondCurve);
+  await redis.connect();
+  const msg = JSON.stringify([launcherMsg, blobMsg]);
+  await redis.publish("trading_log", msg);
+  await redis.disconnect();
 }
 
 export default monitorAFK;

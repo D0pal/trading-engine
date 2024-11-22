@@ -2,3 +2,4 @@ node_modules
 logs.txt
 README
 config.json
+.env
